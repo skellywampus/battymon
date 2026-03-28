@@ -46,7 +46,7 @@ A TUI battery monitor for macOS and Linux.
 ## Build
 
 ```
-git clone https://github.com/yourusername/battymon.git
+git clone https://github.com/skellywampus/battymon.git
 cd battymon
 go mod tidy
 go build -o battymon
