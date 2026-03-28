@@ -26,10 +26,10 @@ A TUI battery monitor for macOS and Linux.
 ## Screenshots
 
 ### macOS
-<img src="[https://github.com/skellywampus/battymon/blob/main/macOS_screenshot.PNG]" alt="">
+<img src="https://github.com/skellywampus/battymon/blob/main/macOS_screenshot.PNG" alt="">
 
 ### Linux on uConsole
-<img src="[https://github.com/skellywampus/battymon/blob/main/uConsole_screenshot.PNG]" alt="">
+<img src="https://github.com/skellywampus/battymon/blob/main/uConsole_screenshot.PNG" alt="">
 
 ## Data sources
 
