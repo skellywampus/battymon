@@ -71,21 +71,21 @@ Install flow:
 
 ### macOS Apple Silicon
 ```
-curl -L -o battymon https://github.com/skellywampus/battymon/releases/download/Release/battymon-darwin-arm64
+curl -L -o battymon https://github.com/skellywampus/battymon/releases/latest/download/battymon-darwin-arm64
 chmod +x battymon
 sudo mv battymon /usr/local/bin/
 ```
 
 ### Linux x86_64
 ```
-curl -L -o battymon https://github.com/skellywampus/battymon/releases/download/Release/battymon-linux-amd64
+curl -L -o battymon https://github.com/skellywampus/battymon/releases/latest/download/battymon-linux-amd64
 chmod +x battymon
 sudo mv battymon /usr/local/bin/
 ```
 
 ### Linux ARM64
 ```
-curl -L -o battymon https://github.com/skellywampus/battymon/releases/download/Release/battymon-linux-arm64
+curl -L -o battymon https://github.com/skellywampus/battymon/releases/latest/download/battymon-linux-arm64
 chmod +x battymon
 sudo mv battymon /usr/local/bin/
 ```
