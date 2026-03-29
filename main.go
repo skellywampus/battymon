@@ -19,25 +19,28 @@ import (
 )
 
 type BatteryInfo struct {
-	Name           string
-	Status         string
-	Percent        float64
-	PowerNowW      float64
-	VoltageNowV    float64
-	CurrentNowA    float64
-	EnergyNowWh    float64
-	EnergyFullWh   float64
-	EnergyDesignWh float64
-	HealthPercent  float64
-	CycleCount     int
-	TemperatureC   float64
-	TimeRemaining  time.Duration
-	TimeToEmpty    time.Duration
-	TimeToFull     time.Duration
-	ACOnline       bool
-	Source         string
-	UpdatedAt      time.Time
-	Warnings       []string
+	Name             string
+	Status           string
+	Percent          float64
+	ReportedPercent  float64
+	EstimatedPercent float64
+	PowerNowW        float64
+	VoltageNowV      float64
+	CurrentNowA      float64
+	EnergyNowWh      float64
+	EnergyFullWh     float64
+	EnergyDesignWh   float64
+	HealthPercent    float64
+	CycleCount       int
+	TemperatureC     float64
+	TimeRemaining    time.Duration
+	TimeToEmpty      time.Duration
+	TimeToFull       time.Duration
+	ACOnline         bool
+	AXPMode          bool
+	Source           string
+	UpdatedAt        time.Time
+	Warnings         []string
 }
 
 type SystemInfo struct {
@@ -158,6 +161,8 @@ func (s *appState) render(snap Snapshot) {
 
 	health := naFloat(b.HealthPercent, "%.1f%%")
 	pct := naFloat(b.Percent, "%.1f%%")
+	reportedPct := naFloat(b.ReportedPercent, "%.1f%%")
+	estimatedPct := naFloat(b.EstimatedPercent, "%.1f%%")
 	pow := formatPower(b.PowerNowW)
 	volts := naFloat(b.VoltageNowV, "%.2f V")
 	amps := naFloat(b.CurrentNowA, "%.3f A")
@@ -187,13 +192,21 @@ func (s *appState) render(snap Snapshot) {
 	}
 	_, _, graphW, _ := s.graph.GetInnerRect()
 	levelBar := percentBar(b.Percent, responsiveBarWidth(graphW))
+	mode := "standard"
+	if b.AXPMode {
+		mode = "AXP / voltage-based estimation"
+	}
 
-	s.header.SetText(fmt.Sprintf("[green]battymon[-]  os=%s  source=%s  battery=%s  updated=%s", runtime.GOOS, b.Source, fallback(b.Name, "unknown"), b.UpdatedAt.Format("15:04:05")))
+	s.header.SetText(fmt.Sprintf("[green]battymon[-]  os=%s  source=%s  mode=%s  battery=%s  updated=%s", runtime.GOOS, b.Source, mode, fallback(b.Name, "unknown"), b.UpdatedAt.Format("15:04:05")))
 
 	s.stats.Clear()
 	rows := make([][2]string, 0, 17)
 	rows = append(rows, [2]string{"Status", fallback(b.Status, "Unknown")})
 	rows = append(rows, [2]string{"Percent", pct})
+	if b.AXPMode {
+		appendRowIfKnown(&rows, "Reported Percent", reportedPct+" (unreliable)")
+		appendRowIfKnown(&rows, "Estimated Percent", estimatedPct)
+	}
 	rows = append(rows, [2]string{"AC Online", ac})
 	appendRowIfKnown(&rows, "Time Remaining", eta)
 	appendRowIfKnown(&rows, "Power", pow)
@@ -296,21 +309,24 @@ func collectLinuxBatteryFromBase(base string) (BatteryInfo, error) {
 	}
 
 	info := BatteryInfo{
-		Name:           fmt.Sprintf("%d batteries", len(parts)),
-		Status:         aggregateLinuxStatus(parts),
-		Percent:        math.NaN(),
-		PowerNowW:      sumFloat(parts, func(b BatteryInfo) float64 { return b.PowerNowW }),
-		VoltageNowV:    avgFloat(parts, func(b BatteryInfo) float64 { return b.VoltageNowV }),
-		CurrentNowA:    sumFloat(parts, func(b BatteryInfo) float64 { return b.CurrentNowA }),
-		EnergyNowWh:    sumFloat(parts, func(b BatteryInfo) float64 { return b.EnergyNowWh }),
-		EnergyFullWh:   sumFloat(parts, func(b BatteryInfo) float64 { return b.EnergyFullWh }),
-		EnergyDesignWh: sumFloat(parts, func(b BatteryInfo) float64 { return b.EnergyDesignWh }),
-		HealthPercent:  math.NaN(),
-		CycleCount:     -1,
-		TemperatureC:   avgFloat(parts, func(b BatteryInfo) float64 { return b.TemperatureC }),
-		ACOnline:       readAnyACOnline(base),
-		Source:         "linux-sysfs",
-		UpdatedAt:      time.Now(),
+		Name:             fmt.Sprintf("%d batteries", len(parts)),
+		Status:           aggregateLinuxStatus(parts),
+		Percent:          math.NaN(),
+		ReportedPercent:  math.NaN(),
+		EstimatedPercent: math.NaN(),
+		PowerNowW:        sumFloat(parts, func(b BatteryInfo) float64 { return b.PowerNowW }),
+		VoltageNowV:      avgFloat(parts, func(b BatteryInfo) float64 { return b.VoltageNowV }),
+		CurrentNowA:      sumFloat(parts, func(b BatteryInfo) float64 { return b.CurrentNowA }),
+		EnergyNowWh:      sumFloat(parts, func(b BatteryInfo) float64 { return b.EnergyNowWh }),
+		EnergyFullWh:     sumFloat(parts, func(b BatteryInfo) float64 { return b.EnergyFullWh }),
+		EnergyDesignWh:   sumFloat(parts, func(b BatteryInfo) float64 { return b.EnergyDesignWh }),
+		HealthPercent:    math.NaN(),
+		CycleCount:       -1,
+		TemperatureC:     avgFloat(parts, func(b BatteryInfo) float64 { return b.TemperatureC }),
+		ACOnline:         readAnyACOnline(base),
+		AXPMode:          anyBool(parts, func(b BatteryInfo) bool { return b.AXPMode }),
+		Source:           "linux-sysfs",
+		UpdatedAt:        time.Now(),
 	}
 	percentSum := 0.0
 	percentCount := 0
@@ -327,6 +343,14 @@ func collectLinuxBatteryFromBase(base string) (BatteryInfo, error) {
 	finalizeBatteryDerivedFields(&info)
 	if math.IsNaN(info.Percent) && percentCount > 0 {
 		info.Percent = percentSum / float64(percentCount)
+	}
+	if info.AXPMode {
+		info.ReportedPercent = avgFloat(parts, func(b BatteryInfo) float64 { return b.ReportedPercent })
+		info.EstimatedPercent = avgFloat(parts, func(b BatteryInfo) float64 { return b.EstimatedPercent })
+		if !math.IsNaN(info.EstimatedPercent) {
+			info.Percent = info.EstimatedPercent
+			info.Warnings = appendUnique(info.Warnings, "reported percentage marked unreliable; using voltage estimate")
+		}
 	}
 	info.Warnings = appendUnique(info.Warnings, fmt.Sprintf("aggregated stats across %d batteries", len(parts)))
 	return info, nil
@@ -749,20 +773,22 @@ func linuxBatteryPaths(base string) ([]string, error) {
 
 func collectLinuxBatteryFromPath(bat string) BatteryInfo {
 	info := BatteryInfo{
-		Name:           filepath.Base(bat),
-		Status:         readTrim(filepath.Join(bat, "status")),
-		Percent:        readFloatScale(filepath.Join(bat, "capacity"), 1),
-		PowerNowW:      math.NaN(),
-		VoltageNowV:    math.NaN(),
-		CurrentNowA:    math.NaN(),
-		EnergyNowWh:    math.NaN(),
-		EnergyFullWh:   math.NaN(),
-		EnergyDesignWh: math.NaN(),
-		HealthPercent:  math.NaN(),
-		CycleCount:     readIntDefault(filepath.Join(bat, "cycle_count"), -1),
-		TemperatureC:   readFloatScale(filepath.Join(bat, "temp"), 10),
-		Source:         "linux-sysfs",
-		UpdatedAt:      time.Now(),
+		Name:             filepath.Base(bat),
+		Status:           readTrim(filepath.Join(bat, "status")),
+		Percent:          readFloatScale(filepath.Join(bat, "capacity"), 1),
+		ReportedPercent:  readFloatScale(filepath.Join(bat, "capacity"), 1),
+		EstimatedPercent: math.NaN(),
+		PowerNowW:        math.NaN(),
+		VoltageNowV:      math.NaN(),
+		CurrentNowA:      math.NaN(),
+		EnergyNowWh:      math.NaN(),
+		EnergyFullWh:     math.NaN(),
+		EnergyDesignWh:   math.NaN(),
+		HealthPercent:    math.NaN(),
+		CycleCount:       readIntDefault(filepath.Join(bat, "cycle_count"), -1),
+		TemperatureC:     readFloatScale(filepath.Join(bat, "temp"), 10),
+		Source:           "linux-sysfs",
+		UpdatedAt:        time.Now(),
 	}
 	energyNow := readFloatScale(filepath.Join(bat, "energy_now"), 1_000_000)
 	energyFull := readFloatScale(filepath.Join(bat, "energy_full"), 1_000_000)
@@ -801,6 +827,19 @@ func collectLinuxBatteryFromPath(bat string) BatteryInfo {
 	info.EnergyNowWh = energyNow
 	info.EnergyFullWh = energyFull
 	info.EnergyDesignWh = energyDesign
+	if strings.EqualFold(filepath.Base(bat), "axp20x-battery") {
+		info.AXPMode = true
+		info.EstimatedPercent = estimatePercentFromVoltage(info.VoltageNowV)
+		if !math.IsNaN(info.EstimatedPercent) {
+			info.Percent = info.EstimatedPercent
+		} else {
+			info.Percent = math.NaN()
+		}
+		info.Warnings = appendUnique(info.Warnings, "reported percentage marked unreliable; using voltage estimate")
+		if !math.IsNaN(info.VoltageNowV) && info.VoltageNowV <= 3.2 {
+			info.Warnings = appendUnique(info.Warnings, "battery voltage is in critical range")
+		}
+	}
 	finalizeBatteryDerivedFields(&info)
 	return info
 }
@@ -880,6 +919,15 @@ func sumFloat(parts []BatteryInfo, selector func(BatteryInfo) float64) float64 {
 		return math.NaN()
 	}
 	return sum
+}
+
+func anyBool(parts []BatteryInfo, selector func(BatteryInfo) bool) bool {
+	for _, p := range parts {
+		if selector(p) {
+			return true
+		}
+	}
+	return false
 }
 
 func avgFloat(parts []BatteryInfo, selector func(BatteryInfo) float64) float64 {
@@ -1052,6 +1100,37 @@ func derivePowerIfMissing(info *BatteryInfo) {
 			}
 		}
 	}
+}
+
+func estimatePercentFromVoltage(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
+		return math.NaN()
+	}
+	points := [][2]float64{
+		{4.20, 100},
+		{4.00, 80},
+		{3.85, 60},
+		{3.70, 40},
+		{3.50, 20},
+		{3.30, 10},
+		{3.20, 3},
+	}
+	if v >= points[0][0] {
+		return 100
+	}
+	last := points[len(points)-1]
+	if v <= last[0] {
+		return 0
+	}
+	for i := 0; i < len(points)-1; i++ {
+		high := points[i]
+		low := points[i+1]
+		if v <= high[0] && v >= low[0] {
+			r := (v - low[0]) / (high[0] - low[0])
+			return low[1] + r*(high[1]-low[1])
+		}
+	}
+	return math.NaN()
 }
 
 func formatPower(w float64) string {
