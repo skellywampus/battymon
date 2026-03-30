@@ -26,7 +26,7 @@ A TUI battery monitor for macOS and Linux.
 ## Screenshots
 
 ### macOS
-<img src="macOS_screenshot.PNG" alt="">
+<img src="macOS_screenshot.png" alt="">
 
 ### Linux on uConsole
 <img src="uConsole_screenshot.jpg" alt="">
