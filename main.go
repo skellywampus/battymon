@@ -77,6 +77,8 @@ var (
 	trailingIntRe    = regexp.MustCompile(`(-?\d+)`)
 )
 
+const axpNominalVoltageV = 3.7
+
 func main() {
 	state := &appState{maxPoints: 60, interval: 2 * time.Second}
 	state.app = tview.NewApplication()
@@ -829,11 +831,39 @@ func collectLinuxBatteryFromPath(bat string) BatteryInfo {
 	info.EnergyDesignWh = energyDesign
 	if strings.EqualFold(filepath.Base(bat), "axp20x-battery") {
 		info.AXPMode = true
+		if !math.IsNaN(info.VoltageNowV) && !math.IsNaN(info.CurrentNowA) && info.CurrentNowA > 0 {
+			info.PowerNowW = info.VoltageNowV * info.CurrentNowA
+		}
 		info.EstimatedPercent = estimatePercentFromVoltage(info.VoltageNowV)
 		if !math.IsNaN(info.EstimatedPercent) {
 			info.Percent = info.EstimatedPercent
 		} else {
 			info.Percent = math.NaN()
+		}
+		if math.IsNaN(info.EnergyFullWh) {
+			chargeFull := readFloatScale(filepath.Join(bat, "charge_full"), 1_000_000)
+			chargeDesign := readFloatScale(filepath.Join(bat, "charge_full_design"), 1_000_000)
+			if !math.IsNaN(chargeFull) && chargeFull > 0 {
+				info.EnergyFullWh = chargeFull * axpNominalVoltageV
+			} else if !math.IsNaN(chargeDesign) && chargeDesign > 0 {
+				info.EnergyFullWh = chargeDesign * axpNominalVoltageV
+			}
+		}
+		if !math.IsNaN(info.EnergyFullWh) && !math.IsNaN(info.EstimatedPercent) {
+			info.EnergyNowWh = info.EnergyFullWh * info.EstimatedPercent / 100.0
+		}
+		if !math.IsNaN(info.PowerNowW) && info.PowerNowW > 0 && !math.IsNaN(info.EnergyNowWh) {
+			if isDischargingStatus(info.Status) {
+				hours := info.EnergyNowWh / info.PowerNowW
+				if hours > 0 && hours < 1000 {
+					info.TimeToEmpty = time.Duration(hours * float64(time.Hour))
+				}
+			} else if isChargingStatus(info.Status) && !math.IsNaN(info.EnergyFullWh) && info.EnergyFullWh > info.EnergyNowWh {
+				hours := (info.EnergyFullWh - info.EnergyNowWh) / info.PowerNowW
+				if hours > 0 && hours < 1000 {
+					info.TimeToFull = time.Duration(hours * float64(time.Hour))
+				}
+			}
 		}
 		info.Warnings = appendUnique(info.Warnings, "reported percentage marked unreliable; using voltage estimate")
 		if !math.IsNaN(info.VoltageNowV) && info.VoltageNowV <= 3.2 {
