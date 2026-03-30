@@ -22,6 +22,7 @@ A TUI battery monitor for macOS and Linux.
   - Wi-Fi state
   - Bluetooth state
 - Aggregated handling for multi-battery Linux systems
+- AXP battery mode with voltage-based estimation for devices that report unreliable battery percentages
 
 ## Screenshots
 
