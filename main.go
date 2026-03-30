@@ -596,12 +596,25 @@ func linuxRfkillType(kind string) string {
 func readAnyACOnline(base string) bool {
 	ents, _ := os.ReadDir(base)
 	for _, e := range ents {
-		path := filepath.Join(base, e.Name(), "online")
-		if readTrim(path) == "1" {
+		dev := filepath.Join(base, e.Name())
+		typ := strings.ToLower(readTrim(filepath.Join(dev, "type")))
+		if !isExternalPowerType(typ) {
+			continue
+		}
+		if readTrim(filepath.Join(dev, "online")) == "1" {
 			return true
 		}
 	}
 	return false
+}
+
+func isExternalPowerType(typ string) bool {
+	switch typ {
+	case "mains", "usb", "usb_dcp", "usb_cdp", "usb_aca", "usb_type_c", "usb_pd", "wireless":
+		return true
+	default:
+		return false
+	}
 }
 
 func firstReadableGlob(pattern string) string {
