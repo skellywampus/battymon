@@ -24,6 +24,7 @@ type BatteryInfo struct {
 	Percent          float64
 	ReportedPercent  float64
 	EstimatedPercent float64
+	EstimateQuality  string
 	PowerNowW        float64
 	VoltageNowV      float64
 	CurrentNowA      float64
@@ -69,15 +70,21 @@ type appState struct {
 	interval    time.Duration
 	screenW     int
 	screenH     int
+	axpPctValid bool
+	axpPctPrev  float64
 }
 
 var (
 	pmsetPercentRe   = regexp.MustCompile(`(\d+)%`)
 	pmsetRemainingRe = regexp.MustCompile(`;\s*(\d+:\d+)\s+remaining`)
 	trailingIntRe    = regexp.MustCompile(`(-?\d+)`)
+	axpCurve         = [][2]float64{{4.20, 100}, {4.00, 80}, {3.85, 60}, {3.70, 40}, {3.50, 20}, {3.30, 10}, {3.20, 3}}
+	axpNominalV      = 3.7
 )
 
-const axpNominalVoltageV = 3.7
+func init() {
+	loadAXPConfigFromEnv()
+}
 
 func main() {
 	state := &appState{maxPoints: 60, interval: 2 * time.Second}
@@ -149,6 +156,14 @@ func (s *appState) refresh() {
 	}
 
 	if !math.IsNaN(snap.Battery.Percent) && snap.Battery.Percent >= 0 {
+		if snap.Battery.AXPMode {
+			snap.Battery.Percent = s.smoothAXPPercent(snap.Battery.Percent)
+			if !math.IsNaN(snap.Battery.EstimatedPercent) {
+				snap.Battery.EstimatedPercent = snap.Battery.Percent
+			}
+		} else {
+			s.axpPctValid = false
+		}
 		s.historyPct = appendTrim(s.historyPct, snap.Battery.Percent, s.maxPoints)
 	}
 
@@ -208,6 +223,7 @@ func (s *appState) render(snap Snapshot) {
 	if b.AXPMode {
 		appendRowIfKnown(&rows, "Reported Percent", reportedPct+" (unreliable)")
 		appendRowIfKnown(&rows, "Estimated Percent", estimatedPct)
+		appendRowIfKnown(&rows, "Estimate Confidence", fallback(b.EstimateQuality, "Estimated"))
 	}
 	rows = append(rows, [2]string{"AC Online", ac})
 	appendRowIfKnown(&rows, "Time Remaining", eta)
@@ -217,7 +233,9 @@ func (s *appState) render(snap Snapshot) {
 	appendRowIfKnown(&rows, "Energy Now", nowWh)
 	appendRowIfKnown(&rows, "Energy Full", fullWh)
 	appendRowIfKnown(&rows, "Design Capacity", designWh)
-	appendRowIfKnown(&rows, "Health", health)
+	if !b.AXPMode {
+		appendRowIfKnown(&rows, "Health", health)
+	}
 	appendRowIfKnown(&rows, "Cycle Count", cycles)
 	appendRowIfKnown(&rows, "Temperature", temp)
 	appendRowIfKnown(&rows, "Brightness", bright)
@@ -793,6 +811,7 @@ func collectLinuxBatteryFromPath(bat string) BatteryInfo {
 		Percent:          readFloatScale(filepath.Join(bat, "capacity"), 1),
 		ReportedPercent:  readFloatScale(filepath.Join(bat, "capacity"), 1),
 		EstimatedPercent: math.NaN(),
+		EstimateQuality:  "",
 		PowerNowW:        math.NaN(),
 		VoltageNowV:      math.NaN(),
 		CurrentNowA:      math.NaN(),
@@ -846,20 +865,24 @@ func collectLinuxBatteryFromPath(bat string) BatteryInfo {
 		info.AXPMode = true
 		if !math.IsNaN(info.VoltageNowV) && !math.IsNaN(info.CurrentNowA) && info.CurrentNowA > 0 {
 			info.PowerNowW = info.VoltageNowV * info.CurrentNowA
+			info.EstimateQuality = "Estimated (voltage + current)"
+		} else if !math.IsNaN(info.VoltageNowV) {
+			info.EstimateQuality = "Estimated (voltage)"
 		}
 		info.EstimatedPercent = estimatePercentFromVoltage(info.VoltageNowV)
 		if !math.IsNaN(info.EstimatedPercent) {
 			info.Percent = info.EstimatedPercent
 		} else {
 			info.Percent = math.NaN()
+			info.EstimateQuality = "Low"
 		}
 		if math.IsNaN(info.EnergyFullWh) {
 			chargeFull := readFloatScale(filepath.Join(bat, "charge_full"), 1_000_000)
 			chargeDesign := readFloatScale(filepath.Join(bat, "charge_full_design"), 1_000_000)
 			if !math.IsNaN(chargeFull) && chargeFull > 0 {
-				info.EnergyFullWh = chargeFull * axpNominalVoltageV
+				info.EnergyFullWh = chargeFull * axpNominalV
 			} else if !math.IsNaN(chargeDesign) && chargeDesign > 0 {
-				info.EnergyFullWh = chargeDesign * axpNominalVoltageV
+				info.EnergyFullWh = chargeDesign * axpNominalV
 			}
 		}
 		if !math.IsNaN(info.EnergyFullWh) && !math.IsNaN(info.EstimatedPercent) {
@@ -881,6 +904,8 @@ func collectLinuxBatteryFromPath(bat string) BatteryInfo {
 		info.Warnings = appendUnique(info.Warnings, "reported percentage marked unreliable; using voltage estimate")
 		if !math.IsNaN(info.VoltageNowV) && info.VoltageNowV <= 3.2 {
 			info.Warnings = appendUnique(info.Warnings, "battery voltage is in critical range")
+		} else if !math.IsNaN(info.VoltageNowV) && info.VoltageNowV <= 3.3 {
+			info.Warnings = appendUnique(info.Warnings, "battery voltage is low")
 		}
 	}
 	finalizeBatteryDerivedFields(&info)
@@ -1120,6 +1145,34 @@ func normalizeBatteryFields(info *BatteryInfo) {
 	}
 }
 
+func (s *appState) smoothAXPPercent(cur float64) float64 {
+	if math.IsNaN(cur) || math.IsInf(cur, 0) {
+		return cur
+	}
+	if !s.axpPctValid {
+		s.axpPctPrev = cur
+		s.axpPctValid = true
+		return cur
+	}
+	const alpha = 0.25
+	const maxStepPerTick = 2.0
+	next := s.axpPctPrev*(1-alpha) + cur*alpha
+	delta := next - s.axpPctPrev
+	if delta > maxStepPerTick {
+		next = s.axpPctPrev + maxStepPerTick
+	} else if delta < -maxStepPerTick {
+		next = s.axpPctPrev - maxStepPerTick
+	}
+	if next < 0 {
+		next = 0
+	}
+	if next > 100 {
+		next = 100
+	}
+	s.axpPctPrev = next
+	return next
+}
+
 func derivePowerIfMissing(info *BatteryInfo) {
 	if !math.IsNaN(info.PowerNowW) && info.PowerNowW > 0 {
 		return
@@ -1149,15 +1202,7 @@ func estimatePercentFromVoltage(v float64) float64 {
 	if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
 		return math.NaN()
 	}
-	points := [][2]float64{
-		{4.20, 100},
-		{4.00, 80},
-		{3.85, 60},
-		{3.70, 40},
-		{3.50, 20},
-		{3.30, 10},
-		{3.20, 3},
-	}
+	points := axpCurve
 	if v >= points[0][0] {
 		return 100
 	}
@@ -1174,6 +1219,46 @@ func estimatePercentFromVoltage(v float64) float64 {
 		}
 	}
 	return math.NaN()
+}
+
+func loadAXPConfigFromEnv() {
+	if s := strings.TrimSpace(os.Getenv("BATTYMON_AXP_NOMINAL_V")); s != "" {
+		if f, err := strconv.ParseFloat(s, 64); err == nil && f > 0 && f < 10 {
+			axpNominalV = f
+		}
+	}
+	if s := strings.TrimSpace(os.Getenv("BATTYMON_AXP_CURVE")); s != "" {
+		if parsed, ok := parseAXPCurve(s); ok {
+			axpCurve = parsed
+		}
+	}
+}
+
+func parseAXPCurve(raw string) ([][2]float64, bool) {
+	parts := strings.Split(raw, ",")
+	if len(parts) < 2 {
+		return nil, false
+	}
+	out := make([][2]float64, 0, len(parts))
+	prevV := math.MaxFloat64
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		chunks := strings.Split(p, ":")
+		if len(chunks) != 2 {
+			return nil, false
+		}
+		v, errV := strconv.ParseFloat(strings.TrimSpace(chunks[0]), 64)
+		pct, errP := strconv.ParseFloat(strings.TrimSpace(chunks[1]), 64)
+		if errV != nil || errP != nil || v <= 0 || pct < 0 || pct > 100 {
+			return nil, false
+		}
+		if v >= prevV {
+			return nil, false
+		}
+		prevV = v
+		out = append(out, [2]float64{v, pct})
+	}
+	return out, true
 }
 
 func formatPower(w float64) string {
