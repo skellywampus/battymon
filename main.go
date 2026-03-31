@@ -72,6 +72,8 @@ type appState struct {
 	screenH     int
 	axpPctValid bool
 	axpPctPrev  float64
+	macPwrValid bool
+	macPwrEMA   float64
 }
 
 var (
@@ -166,6 +168,9 @@ func (s *appState) refresh() {
 		}
 		s.historyPct = appendTrim(s.historyPct, snap.Battery.Percent, s.maxPoints)
 	}
+	if runtime.GOOS == "darwin" {
+		snap.Battery.PowerNowW = s.smoothDarwinPower(snap.Battery.PowerNowW)
+	}
 
 	s.app.QueueUpdateDraw(func() {
 		s.render(snap)
@@ -206,6 +211,11 @@ func (s *appState) render(snap Snapshot) {
 		eta = durationShort(b.TimeToEmpty)
 	} else if b.ACOnline && b.TimeToFull > 0 {
 		eta = durationShort(b.TimeToFull)
+	} else if shouldShowGatheringETA(b) {
+		eta = "Gathering samples..."
+	}
+	if pow == "N/A" && shouldShowGatheringPower(b) {
+		pow = "Gathering samples..."
 	}
 	_, _, graphW, _ := s.graph.GetInnerRect()
 	levelBar := percentBar(b.Percent, responsiveBarWidth(graphW))
@@ -421,22 +431,6 @@ func collectDarwinBattery() (BatteryInfo, error) {
 	}
 	if math.IsNaN(info.Percent) && !math.IsNaN(info.EnergyNowWh) && !math.IsNaN(info.EnergyFullWh) && info.EnergyFullWh > 0 {
 		info.Percent = info.EnergyNowWh / info.EnergyFullWh * 100
-	}
-	if !math.IsNaN(info.PowerNowW) && info.PowerNowW > 0 {
-		if isDischargingStatus(info.Status) && !math.IsNaN(info.EnergyNowWh) {
-			hours := info.EnergyNowWh / info.PowerNowW
-			if hours > 0 && hours < 1000 {
-				info.TimeToEmpty = time.Duration(hours * float64(time.Hour))
-			}
-		} else if isChargingStatus(info.Status) && !math.IsNaN(info.EnergyFullWh) && !math.IsNaN(info.EnergyNowWh) {
-			remaining := info.EnergyFullWh - info.EnergyNowWh
-			if remaining > 0 {
-				hours := remaining / info.PowerNowW
-				if hours > 0 && hours < 1000 {
-					info.TimeToFull = time.Duration(hours * float64(time.Hour))
-				}
-			}
-		}
 	}
 	selectDisplayedETA(&info)
 
@@ -1173,6 +1167,23 @@ func (s *appState) smoothAXPPercent(cur float64) float64 {
 	return next
 }
 
+func (s *appState) smoothDarwinPower(cur float64) float64 {
+	if math.IsNaN(cur) || math.IsInf(cur, 0) || cur <= 0 {
+		if s.macPwrValid {
+			return s.macPwrEMA
+		}
+		return cur
+	}
+	if !s.macPwrValid {
+		s.macPwrEMA = cur
+		s.macPwrValid = true
+		return cur
+	}
+	const alpha = 0.3
+	s.macPwrEMA = s.macPwrEMA*(1-alpha) + cur*alpha
+	return s.macPwrEMA
+}
+
 func derivePowerIfMissing(info *BatteryInfo) {
 	if !math.IsNaN(info.PowerNowW) && info.PowerNowW > 0 {
 		return
@@ -1269,4 +1280,18 @@ func formatPower(w float64) string {
 		return fmt.Sprintf("%.3f W", w)
 	}
 	return fmt.Sprintf("%.2f W", w)
+}
+
+func shouldShowGatheringPower(b BatteryInfo) bool {
+	return !math.IsNaN(b.Percent) || !math.IsNaN(b.VoltageNowV) || !math.IsNaN(b.CurrentNowA)
+}
+
+func shouldShowGatheringETA(b BatteryInfo) bool {
+	if isDischargingStatus(b.Status) || isChargingStatus(b.Status) {
+		return true
+	}
+	if b.AXPMode && !math.IsNaN(b.EstimatedPercent) {
+		return true
+	}
+	return false
 }
